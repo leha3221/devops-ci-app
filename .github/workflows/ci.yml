@@ -120,12 +120,26 @@ jobs:
     env:
       VM_HOST: "192.168.213.101"
     steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-        with:
-          persist-credentials: false
+      - name: Checkout using Git on WSL
+        id: deploy_checkout
+        run: |
+          checkout_dir=$(mktemp -d "$RUNNER_TEMP/deploy.XXXXXX")
+          git init --quiet "$checkout_dir"
+          git -C "$checkout_dir" fetch --no-tags --depth=1 "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git" "$GITHUB_SHA"
+          git -C "$checkout_dir" checkout --quiet --detach FETCH_HEAD
+          test "$(git -C "$checkout_dir" rev-parse HEAD)" = "$GITHUB_SHA"
+          echo "directory=$checkout_dir" >> "$GITHUB_OUTPUT"
       - name: Deploy with Ansible
-        working-directory: ansible
+        working-directory: ${{ steps.deploy_checkout.outputs.directory }}/ansible
         run: ansible-playbook site.yml -e "app_tag=$GITHUB_SHA"
       - name: Check through Nginx
-        run: curl --fail --silent --show-error --max-time 10 "http://${VM_HOST}/health"
+        run: |
+          curl --fail --silent --show-error --max-time 10 "http://${VM_HOST}/health"
+          curl --fail --silent --show-error --max-time 10 "http://${VM_HOST}/"
+      - name: Verify running image tag
+        run: |
+          expected="${IMAGE_NAME,,}:${GITHUB_SHA}"
+          actual=$(ssh -o BatchMode=yes -o ConnectTimeout=10 -i ~/.ssh/devops_vm "devops@${VM_HOST}" \
+            "docker inspect -f '{{.Config.Image}}' devops-ci-app")
+          printf 'Expected: %s\nRunning: %s\n' "$expected" "$actual"
+          test "$actual" = "$expected"
